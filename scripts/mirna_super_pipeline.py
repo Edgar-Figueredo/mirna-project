@@ -6,6 +6,9 @@ import time
 import sys
 import subprocess
 
+# =========================
+# AUTO-INSTALL DEPENDENCIES
+# =========================
 def ensure_package(pip_name, import_name=None):
     import_name = import_name or pip_name
     try:
@@ -15,10 +18,6 @@ def ensure_package(pip_name, import_name=None):
         subprocess.check_call([sys.executable, "-m", "pip", "install", pip_name])
         return __import__(import_name)
 
-
-# =========================
-# AUTO IMPORTS (CRITICAL)
-# =========================
 matplotlib = ensure_package("matplotlib")
 import matplotlib.pyplot as plt
 venn2 = ensure_package("matplotlib-venn", "matplotlib_venn").venn2
@@ -28,160 +27,159 @@ venn2 = ensure_package("matplotlib-venn", "matplotlib_venn").venn2
 # =========================
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-DATA_DIR = os.path.join(BASE_DIR, "data")
-RAW_DIR = os.path.join(DATA_DIR, "raw")
-PROC_DIR = os.path.join(DATA_DIR, "processed")
+DATA_DIR   = os.path.join(BASE_DIR, "data")
+RAW_DIR    = os.path.join(DATA_DIR, "raw")
+PROC_DIR   = os.path.join(DATA_DIR, "processed")
 
-GENCODE_GTF = os.path.join(RAW_DIR, "gencode.v49.chr.gtf.gz")
-MIRBASE_FA = os.path.join(RAW_DIR, "mature.fa.gz")
+GENCODE_GTF    = os.path.join(RAW_DIR, "gencode.v49.chr.gtf.gz")
+MIRBASE_FA     = os.path.join(RAW_DIR, "mature.fa")
 MIRGENEDB_FILE = os.path.join(RAW_DIR, "mirgenedb.bed")
 
-# URLs 
-GENCODE_URL = "https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_49/gencode.v49.chr.gtf.gz"
-MIRBASE_URL = "https://www.mirbase.org/download/mature.fa"
-MIRGENEDB_URL = "https://mirgenedb.org/gff/hsa?all=1&sort=pos"
-
-def debug_paths():
-    print("\n[DEBUG PATHS]")
-    print("BASE_DIR:", BASE_DIR)
-    print("RAW_DIR:", RAW_DIR)
-    print("GENCODE_GTF:", GENCODE_GTF)
-    print("MIRBASE_FA:", MIRBASE_FA)
-    print("MIRGENEDB_FILE:", MIRGENEDB_FILE)
-    print("-" * 40)
-# =========================
-# ENVIRONMENT CHECK
-# =========================
-REQUIRED = [
-    "matplotlib",
-    "matplotlib_venn",
-]
-
-missing = []
-
-for pkg in REQUIRED:
-    try:
-        __import__(pkg)
-    except ImportError:
-        missing.append(pkg)
-
-if missing:
-    print("[ERROR] Missing dependencies:")
-    for m in missing:
-        print(" -", m)
-    print("\nRun:")
-    print("pip install -r env/requirements.txt")
-    exit()
+GENCODE_URL  = "https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_49/gencode.v49.chr.gtf.gz"
+MIRBASE_URL  = "https://www.mirbase.org/download/mature.fa"
+MIRGENEDB_URL = "https://mirgenedb.org/static/data/hsa/hsa-all.bed"
 
 # =========================
 # UTILS
 # =========================
 def ensure_dirs():
-    os.makedirs(RAW_DIR, exist_ok=True)
+    os.makedirs(RAW_DIR,  exist_ok=True)
     os.makedirs(PROC_DIR, exist_ok=True)
     print("[DEBUG] Working directory:", os.getcwd())
 
-def is_valid_gzip(filepath):
-    import os
-    if not os.path.exists(filepath):
-        return False
-    with open(filepath, "rb") as f:
-        return f.read(2) == b"\x1f\x8b"
+def debug_paths():
+    print("\n[DEBUG PATHS]")
+    print("  BASE_DIR     :", BASE_DIR)
+    print("  RAW_DIR      :", RAW_DIR)
+    print("  PROC_DIR     :", PROC_DIR)
+    print("  GENCODE_GTF  :", GENCODE_GTF)
+    print("  MIRBASE_FA   :", MIRBASE_FA)
+    print("  MIRGENEDB_BED:", MIRGENEDB_FILE)
+    print("-" * 50)
 
 def download_file(url, output):
     if os.path.exists(output):
-        print(f"[SKIP] File already exists: {output}")
+        print(f"[SKIP] Already exists: {output}")
         return
-
-    print(f"[INFO] Downloading {url}")
-
+    print(f"[DOWNLOAD] {url}")
     try:
         urllib.request.urlretrieve(url, output)
+        print(f"[DONE] Saved to: {output}")
     except Exception as e:
         print(f"[ERROR] Download failed: {e}")
 
-    print(f"[DONE] File downloaded: {output}")
+def check_file(path, label=""):
+    tag = f" ({label})" if label else ""
+    if not os.path.exists(path):
+        print(f"[ERROR] Missing file{tag}: {path}")
+        return False
+    size_mb = os.path.getsize(path) / (1024 * 1024)
+    print(f"[OK] {path}{tag}  ({size_mb:.2f} MB)")
+    return True
 
 # =========================
-# GENCODE PARSE
+# NORMALIZATION  (shared by all parsers)
+# =========================
+def normalize(name):
+    """
+    Converts any miRNA identifier to uppercase gene-level format.
+
+    Handles all three database naming styles:
+        GENCODE  : mir-21          →  MIR21
+        miRBase  : hsa-miR-21-5p  →  MIR21
+        miRGeneDB: Hsa-Mir-21_pre →  MIR21
+
+    Key transforms applied (in order):
+        1. Remove species prefix (hsa- / Hsa-)
+        2. Normalise family keyword (Mir- / miR- / mir- → mir | Let- / let- → let)
+        3. Remove arm annotation (-5p / -3p / _5p / _3p with optional *)
+        4. Remove the hyphen between keyword and number (mir-21 → mir21)
+        5. Uppercase everything
+    """
+    name = name.strip()
+
+    # 1. Strip species prefix
+    name = re.sub(r'^[Hh]sa-', '', name)
+
+    # 2. Normalise family keyword to lowercase stub without trailing hyphen
+    #    Handles: Mir-  miR-  mir-  →  mir
+    #             Let-  let-        →  let
+    name = re.sub(r'^[Mm]ir-', 'mir', name)
+    name = re.sub(r'^[Ll]et-', 'let', name)
+
+    # 3. Remove arm annotations wherever they appear
+    #    Covers: -5p  -3p  _5p  _3p  with optional trailing *
+    name = re.sub(r'[-_][35]p\*?$', '', name)
+
+    # 4. Collapse the separator between keyword and number
+    #    mir-21 → mir21   let-7g → let7g
+    name = re.sub(r'^(mir|let)-', r'\1', name)
+
+    # 5. Uppercase
+    name = name.upper()
+    return name
+
+def collapse_family(name):
+    """
+    Collapse miRGeneDB paralog/family suffixes after normalize() has been applied.
+
+    miRGeneDB encodes paralogs as  Hsa-Mir-8-P1a_pre, Hsa-Mir-8-P2a_pre …
+    After normalize() those become  MIR8-P1A, MIR8-P2A …
+    This function strips the -P<digits><letters> suffix so all paralogs
+    map to the same gene-level token (MIR8).
+
+    Also handles the LET-7 family style from miRGeneDB:
+        LET-7-P2A1 → LET7   (the LET-7 hyphen is already gone after normalize,
+                              but the -P2A1 suffix remains)
+    """
+    # Remove -P<number><optional letters> suffix (case-insensitive due to prior upper())
+    name = re.sub(r'-P\d+[A-Z]*$', '', name)
+    return name
+
+# =========================
+# STEP 1 — DATA ACQUISITION
+# =========================
+def acquire_data():
+    print("\n" + "=" * 60)
+    print("[STEP 1] Data acquisition")
+    print("=" * 60)
+    print("[STORY] The pipeline integrates three complementary databases:")
+    print("  • GENCODE   — genomic loci and gene-level annotation (GTF)")
+    print("  • miRBase   — mature miRNA sequences, including 5p/3p arms (FASTA)")
+    print("  • miRGeneDB — evolutionarily validated, high-confidence miRNA genes (BED)")
+    print("[STORY] Each database captures a different biological layer.")
+    print("[STORY] Only by integrating all three can we define a truly robust miRNA set.")
+    time.sleep(2)
+
+    download_file(GENCODE_URL,  GENCODE_GTF)
+    download_file(MIRBASE_URL,  MIRBASE_FA)
+    download_file(MIRGENEDB_URL, MIRGENEDB_FILE)
+
+    print("\n[CHECKPOINT] Validating downloaded files...")
+    ok = all([
+        check_file(GENCODE_GTF,    "GENCODE GTF"),
+        check_file(MIRBASE_FA,     "miRBase FASTA"),
+        check_file(MIRGENEDB_FILE, "miRGeneDB BED"),
+    ])
+    if not ok:
+        print("[FATAL] One or more required files are missing. Aborting.")
+        sys.exit(1)
+
+# =========================
+# STEP 2 — PARSE GENCODE
 # =========================
 def parse_gencode():
-    print("\n[STEP 3] Parsing GENCODE annotation...")
-    print("[STORY] We extract miRNA genes based on gene_type = 'miRNA'.")
-    print("[STORY] Important: GENCODE represents miRNAs as genomic loci, not sequences.")
+    print("\n" + "=" * 60)
+    print("[STEP 2] Parsing GENCODE annotation")
+    print("=" * 60)
+    print("[STORY] GENCODE encodes miRNAs as genomic loci with gene/transcript structure.")
+    print("[STORY] We filter entries where gene_type = 'miRNA' and collapse to unique gene symbols.")
+    print("[INFO]  Fields extracted: CHROM, START, END, STRAND, GENE_NAME, GENE_ID")
     time.sleep(2)
-    print("[INFO] Parsing GENCODE...")
-    print("[INFO] Extracting fields: CHROM, START, END, STRAND, GENE_NAME, GENE_ID, TRANSCRIPT_NAME, TRANSCRIPT_ID")
-    print("[INFO] Step explanation: Parsing GTF file and extracting miRNA entries based on gene_type = 'miRNA'.")
-    time.sleep(1)
 
-    example_records = []
-
-    output = f"{PROC_DIR}/gencode_mirna.txt"
+    output_path = os.path.join(PROC_DIR, "gencode_mirna.txt")
     mirnas = set()
-
-    with gzip.open(GENCODE_GTF, "rt") as f:
-        for line in f:
-            if line.startswith("#"):
-                continue
-
-            if 'gene_type "miRNA"' not in line:
-                continue
-
-            chrom = line.split("\t")[0]
-            start = line.split("\t")[3]
-            end = line.split("\t")[4]
-            strand = line.split("\t")[6]
-
-            gene_name_match = re.search(r'gene_name "([^"]+)"', line)
-            gene_id_match = re.search(r'gene_id "([^"]+)"', line)
-            transcript_name_match = re.search(r'transcript_name "([^"]+)"', line)
-            transcript_id_match = re.search(r'transcript_id "([^"]+)"', line)
-
-            if gene_name_match and len(example_records) < 5:
-                example_records.append({
-                    "CHROM": chrom,
-                    "START": start,
-                    "END": end,
-                    "STRAND": strand,
-                    "GENE_NAME": gene_name_match.group(1),
-                    "GENE_ID": gene_id_match.group(1) if gene_id_match else "NA",
-                    "TRANSCRIPT_NAME": transcript_name_match.group(1) if transcript_name_match else "NA",
-                    "TRANSCRIPT_ID": transcript_id_match.group(1) if transcript_id_match else "NA"
-                })
-
-            if gene_name_match:
-                name = gene_name_match.group(1).lower()
-                mirnas.add(name)
-
-    print("[INFO] Example parsed GENCODE entries (raw records before deduplication; note multiple entries can correspond to the same GENE_NAME due to transcripts):")
-    for rec in example_records:
-        print(rec)
-
-    print("[INFO] Note: Final miRNA list is collapsed at the GENE_NAME level (unique gene symbols).")
-
-    with open(output, "w") as out:
-        for m in sorted(mirnas):
-            out.write(m + "\n")
-
-    print(f"[DONE] GENCODE miRNA: {len(mirnas)}")
-    return output, mirnas
-
-# =========================
-# GENERATE BED FROM GENCODE
-# =========================
-def generate_bed_from_gencode():
-    print("\n[STEP] Generating BED file from GENCODE annotation...")
-
-    input_file = f"{PROC_DIR}/gencode_mirna.txt"
-    output_file = f"{PROC_DIR}/mirna_coordinates_chr.bed"
-
-    print("[STORY] We convert miRNA gene annotations into BED format.")
-    print("[STORY] BED format enables genome coordinate-based operations (e.g., BEDTOOLS extraction).")
-
-    time.sleep(2)
-
-    bed_entries = []
+    example_records = []
 
     with gzip.open(GENCODE_GTF, "rt") as f:
         for line in f:
@@ -191,595 +189,547 @@ def generate_bed_from_gencode():
                 continue
 
             cols = line.strip().split("\t")
-            chrom = cols[0]
-            start = cols[3]
-            end = cols[4]
+            chrom  = cols[0]
+            start  = cols[3]
+            end    = cols[4]
             strand = cols[6]
 
-            match = re.search(r'gene_name "([^"]+)"', line)
-            if match:
-                gene = match.group(1).upper()
+            gn_match  = re.search(r'gene_name "([^"]+)"', line)
+            gid_match = re.search(r'gene_id "([^"]+)"',   line)
 
-                bed_entries.append((chrom, start, end, gene, "0", strand))
+            if not gn_match:
+                continue
 
-    with open(output_file, "w") as out:
-        for b in bed_entries:
-            out.write("\t".join(b) + "\n")
+            gene_name = gn_match.group(1)
+            mirnas.add(gene_name.lower())
 
-    print(f"[DONE] BED file created: {output_file}")
-    print(f"[INFO] Total entries: {len(bed_entries)}")
+            if len(example_records) < 5:
+                example_records.append({
+                    "CHROM": chrom, "START": start, "END": end, "STRAND": strand,
+                    "GENE_NAME": gene_name,
+                    "GENE_ID": gid_match.group(1) if gid_match else "NA",
+                })
 
-    return output_file
-# =========================
-# MIRBASE PARSE
-# =========================
-def parse_mirbase():
-    print("\n[STEP 4.1] Parsing miRBase sequences...")
-    print("[STORY] Extracting human mature miRNAs (hsa-) from FASTA headers.")
-    print("[STORY] miRBase provides mature miRNAs including 5p and 3p arms.")
-    time.sleep(2)
+    print("[INFO] Example parsed GENCODE records (pre-deduplication):")
+    for rec in example_records:
+        print(" ", rec)
+    print("[INFO] Multiple records per gene are expected — GENCODE annotates transcripts individually.")
+    print(f"[DONE] Unique GENCODE miRNA gene symbols: {len(mirnas)}")
 
-    fa_path = MIRBASE_FA
-
-    if not os.path.exists(fa_path):
-        print(f"[ERROR] miRBase FASTA not found: {fa_path}")
-        print("👉 Ensure download step completed successfully.")
-        exit()
-
-    print("[INFO] Using miRBase FASTA (deterministic mode, no gzip handling).")
-
-    output = f"{PROC_DIR}/mirbase_hsa.txt"
-    mirnas = set()
-
-    with open(fa_path) as f:
-        for line in f:
-            if line.startswith(">") and "hsa" in line:
-                name = line.split()[0].replace(">", "").lower()
-                mirnas.add(name)
-
-    with open(output, "w") as out:
+    with open(output_path, "w") as fh:
         for m in sorted(mirnas):
-            out.write(m + "\n")
+            fh.write(m + "\n")
 
-    print(f"[DONE] miRBase miRNA: {len(mirnas)}")
+    return output_path, mirnas
 
-    return output
 # =========================
-# MIRGENEDB PARSE
+# STEP 3 — GENERATE BED + DEDUPLICATE
 # =========================
-
-def parse_mirgenedb():
-    print("\n[STEP 4.2] Parsing miRGeneDB (bona fide miRNA genes)...")
-    print("[STORY] We now validate miRNA genes using evolutionary curated dataset.")
-    print("[STORY] miRGeneDB distinguishes true miRNA genes from low-confidence annotations.")
+def generate_bed_from_gencode():
+    print("\n" + "=" * 60)
+    print("[STEP 3] Generating deduplicated BED file from GENCODE")
+    print("=" * 60)
+    print("[STORY] BED format encodes genomic intervals and enables coordinate-based operations.")
+    print("[STORY] GENCODE contains multiple GTF entries per gene (one per transcript/feature).")
+    print("[PROBLEM] Without deduplication, BEDTOOLS would extract the same locus multiple times,")
+    print("          inflating sequence counts and biasing downstream analyses.")
+    print("[SOLUTION] We retain only unique (CHROM, START, END, GENE_NAME) combinations.")
     time.sleep(2)
 
-    mirnas = set()
+    raw_bed_path    = os.path.join(PROC_DIR, "mirna_coordinates_chr.bed")
+    unique_bed_path = os.path.join(PROC_DIR, "mirna_coordinates_unique.bed")
 
-    with open(MIRGENEDB_FILE) as f:
+    # --- Build raw BED ---
+    bed_entries = []
+    with gzip.open(GENCODE_GTF, "rt") as f:
         for line in f:
             if line.startswith("#"):
                 continue
+            if 'gene_type "miRNA"' not in line:
+                continue
+            cols  = line.strip().split("\t")
+            chrom  = cols[0]
+            start  = cols[3]
+            end    = cols[4]
+            strand = cols[6]
+            match  = re.search(r'gene_name "([^"]+)"', line)
+            if match:
+                bed_entries.append((chrom, start, end, match.group(1).upper(), "0", strand))
 
+    with open(raw_bed_path, "w") as fh:
+        for b in bed_entries:
+            fh.write("\t".join(b) + "\n")
+
+    # --- Deduplicate ---
+    seen = set()
+    with open(raw_bed_path) as fin, open(unique_bed_path, "w") as fout:
+        for line in fin:
+            key = tuple(line.strip().split("\t")[:4])  # chr, start, end, name
+            if key not in seen:
+                seen.add(key)
+                fout.write(line)
+
+    print(f"[DONE] Raw BED entries    : {len(bed_entries)}")
+    print(f"[DONE] Unique BED entries : {len(seen)}")
+    print("[EXPECTATION] Unique loci should approximate annotated miRNA genes in GENCODE (~1800–1900).")
+    return unique_bed_path
+
+# =========================
+# STEP 4 — PARSE miRBase
+# =========================
+def parse_mirbase():
+    print("\n" + "=" * 60)
+    print("[STEP 4] Parsing miRBase mature miRNA sequences")
+    print("=" * 60)
+    print("[STORY] miRBase catalogs mature miRNA sequences for all species.")
+    print("[STORY] We extract only human entries (prefix 'hsa-') from the FASTA headers.")
+    print("[STORY] Each entry represents a processed arm (5p or 3p) of a miRNA precursor.")
+    time.sleep(2)
+
+    output_path = os.path.join(PROC_DIR, "mirbase_hsa.txt")
+    mirnas = set()
+
+    with open(MIRBASE_FA) as fh:
+        for line in fh:
+            if line.startswith(">") and "hsa" in line:
+                name = line.split()[0].lstrip(">").lower()
+                mirnas.add(name)
+
+    with open(output_path, "w") as fh:
+        for m in sorted(mirnas):
+            fh.write(m + "\n")
+
+    print(f"[DONE] Human miRBase mature miRNAs: {len(mirnas)}")
+    return output_path, mirnas
+
+# =========================
+# STEP 5 — SEQUENCE EXTRACTION (bedtools)
+# =========================
+def extract_sequences(bed_file):
+    print("\n" + "=" * 60)
+    print("[STEP 5] Extracting genomic miRNA sequences with BEDTOOLS")
+    print("=" * 60)
+    print("[STORY] We now move from annotation to sequences.")
+    print("[STORY] Using the deduplicated GENCODE loci, BEDTOOLS retrieves the actual DNA")
+    print("        sequence of each miRNA gene from the human reference genome.")
+    print("[INFO]  Options used: -nameOnly (FASTA headers = gene name), -s (strand-aware)")
+    time.sleep(2)
+
+    import shutil
+    if not shutil.which("bedtools"):
+        print("[ERROR] bedtools is not installed or not in PATH.")
+        print("        Linux/Mac: conda install -c bioconda bedtools")
+        print("        Windows  : use WSL2 or a conda environment with bioconda")
+        sys.exit(1)
+    print("[INFO] bedtools detected ✔")
+
+    genome_fa = os.path.join(RAW_DIR, "genome.fa")
+    genome_gz = os.path.join(RAW_DIR, "genome.fa.gz")
+    output_fa = os.path.join(PROC_DIR, "mirna_sequences.fa")
+
+    if os.path.exists(genome_fa):
+        print("[SKIP] genome.fa already exists ✔")
+    elif os.path.exists(genome_gz):
+        print("[INFO] Decompressing genome.fa.gz ...")
+        subprocess.run(["gunzip", genome_gz], check=True)
+        print("[DONE] genome.fa ready ✔")
+    else:
+        print("[ERROR] Reference genome not found. Expected:")
+        print(f"        {genome_fa}  OR  {genome_gz}")
+        sys.exit(1)
+
+    cmd = ["bedtools", "getfasta",
+           "-fi", genome_fa, "-bed", bed_file,
+           "-fo", output_fa, "-nameOnly", "-s"]
+    try:
+        subprocess.run(cmd, check=True)
+        print("[DONE] Sequence extraction completed ✔")
+    except subprocess.CalledProcessError:
+        print("[ERROR] BEDTOOLS execution failed. Check genome file and BED format.")
+        sys.exit(1)
+
+    # --- Quick FASTA validation ---
+    seq_count, bad_headers = 0, 0
+    with open(output_fa) as fh:
+        for line in fh:
+            if line.startswith(">"):
+                seq_count += 1
+                h = line.strip().lstrip(">")
+                if not h.startswith("MIR") and not h.startswith("LET"):
+                    bad_headers += 1
+
+    print(f"[VALIDATION] Sequences extracted : {seq_count}")
+    print(f"[VALIDATION] Unexpected headers  : {bad_headers}")
+    if bad_headers == 0:
+        print("[SUCCESS] All FASTA headers are correctly normalized (MIR/LET format) ✔")
+    else:
+        print("[WARNING] Some headers are unexpected — review BED name field.")
+
+    return output_fa
+
+# =========================
+# STEP 6 — CLEAN + NORMALIZE GENCODE
+# =========================
+def clean_and_normalize_gencode(raw_file, raw_set):
+    print("\n" + "=" * 60)
+    print("[STEP 6] Cleaning and normalizing GENCODE identifiers")
+    print("=" * 60)
+    print("[STORY] The raw GENCODE gene symbol list may contain non-canonical entries")
+    print("        (e.g., ENSG IDs or read-through genes).")
+    print("[SOLUTION] We retain only entries starting with 'mir' or 'let', then apply")
+    print("           the shared normalization function to convert to MIR/LET format.")
+    time.sleep(1)
+
+    # --- Clean ---
+    clean_path = os.path.join(PROC_DIR, "gencode_clean.txt")
+    with open(raw_file) as fin, open(clean_path, "w") as fout:
+        for line in fin:
+            if line.startswith("mir") or line.startswith("let"):
+                fout.write(line)
+
+    clean_count = sum(1 for _ in open(clean_path))
+    removed = raw_set - set(l.strip() for l in open(clean_path))
+    print(f"[DEBUG] Raw symbols      : {len(raw_set)}")
+    print(f"[DEBUG] After filtering  : {clean_count}")
+    print(f"[DEBUG] Removed entries  : {len(removed)}")
+    print(f"[DEBUG] Removed examples : {list(removed)[:8]}")
+
+    # --- Normalize ---
+    norm_path = os.path.join(PROC_DIR, "gencode_norm.txt")
+    norm_set  = set()
+    with open(clean_path) as fh:
+        for line in fh:
+            norm_set.add(normalize(line.strip()))
+
+    with open(norm_path, "w") as fh:
+        for m in sorted(norm_set):
+            fh.write(m + "\n")
+
+    print(f"[DONE] Normalized GENCODE miRNA symbols: {len(norm_set)}")
+    print(f"[EXAMPLE] {list(norm_set)[:8]}")
+    return norm_path, norm_set
+
+# =========================
+# STEP 7 — NORMALIZE miRBase
+# =========================
+def normalize_mirbase(raw_file):
+    print("\n" + "=" * 60)
+    print("[STEP 7] Normalizing miRBase identifiers")
+    print("=" * 60)
+    print("[STORY] miRBase uses a different naming convention from GENCODE.")
+    print("[EXAMPLE]")
+    print("  miRBase : hsa-miR-21-5p  →  normalized: MIR21")
+    print("  miRBase : hsa-let-7g-3p  →  normalized: LET7G")
+    print("[STORY] Removing species prefix and arm annotation allows gene-level comparison")
+    print("        across databases that would otherwise appear to have low overlap.")
+    time.sleep(2)
+
+    norm_path = os.path.join(PROC_DIR, "mirbase_norm.txt")
+    norm_set  = set()
+    with open(raw_file) as fh:
+        for line in fh:
+            norm_set.add(normalize(line.strip()))
+
+    with open(norm_path, "w") as fh:
+        for m in sorted(norm_set):
+            fh.write(m + "\n")
+
+    print(f"[DONE] Normalized miRBase miRNA symbols: {len(norm_set)}")
+    print(f"[EXAMPLE] {list(norm_set)[:8]}")
+    return norm_path, norm_set
+
+# =========================
+# STEP 8 — PARSE miRGeneDB  ← FIX: file now reliably written before compare()
+# =========================
+def parse_mirgenedb():
+    print("\n" + "=" * 60)
+    print("[STEP 8] Parsing miRGeneDB — evolutionary validation layer")
+    print("=" * 60)
+    print("[STORY] Not every annotated miRNA is a bona fide miRNA gene.")
+    print("[STORY] miRGeneDB applies strict evolutionary criteria to retain only")
+    print("        miRNAs with conserved biogenesis hallmarks across species.")
+    print("[STORY] We use this curated set as a high-confidence reference filter.")
+    print("[INFO]  Parsing precursor-level entries (_pri / _pre) to avoid arm duplicates.")
+    time.sleep(2)
+
+    mirnas = set()
+    debug_examples = []   # capture a few transformations for diagnostic output
+
+    with open(MIRGENEDB_FILE) as fh:
+        for line in fh:
+            if line.startswith("#"):
+                continue
             cols = line.strip().split("\t")
             if len(cols) < 4:
                 continue
 
-            # BED format: chr, start, end, name
-            name = cols[3]
-            mirnas.add(normalize(name))
+            raw_name = cols[3]
 
-    print(f"[DONE] miRGeneDB curated miRNAs: {len(mirnas)}")
+            # Keep only precursor-level entries (_pre preferred; _pri also accepted).
+            # This avoids counting 5p/3p arms as separate genes.
+            if not (raw_name.endswith("_pre") or raw_name.endswith("_pri")):
+                continue
 
-    return mirnas
-# =========================
-# CLEAN GENCODE (REMOVE ENSG)
-# =========================
-def clean_gencode(input_file, raw_set=None):
-    print("[INFO] Filtering GENCODE for valid miRNA gene symbols (removing non-miRNA entries and technical artifacts)...")
-    import time
-    print("[INFO] Step explanation: Filtering to retain canonical miRNA gene symbols (mir/let families).")
-    time.sleep(1)
+            # Strip structural suffixes BEFORE calling normalize()
+            # so the shared function receives a clean stem like "Mir-21" or "Let-7"
+            clean = raw_name
+            clean = re.sub(r'_(pre|pri)$', '', clean)   # remove _pre / _pri
+            clean = re.sub(r'_[35]p\*?$',  '', clean)  # remove _5p / _3p if present
 
-    output = f"{PROC_DIR}/gencode_clean.txt"
+            # normalize()       : strips species prefix, unifies Mir-/miR-/mir-, uppercases
+            # collapse_family() : strips -P<n><letters> paralog suffix  (MIR8-P1A → MIR8)
+            norm_name = collapse_family(normalize(clean))
+            mirnas.add(norm_name)
 
-    with open(input_file) as f, open(output, "w") as out:
-        for line in f:
-            # keep only canonical miRNA gene names (mir / let families)
-            if line.startswith("mir") or line.startswith("let"):
-                out.write(line)
+            if len(debug_examples) < 8:
+                debug_examples.append((raw_name, clean, norm_name))
 
-    if raw_set is not None:
-        print(f"[DEBUG] Raw GENCODE miRNA: {len(raw_set)}")
-        print(f"[DEBUG] After filtering: {sum(1 for _ in open(output))}")
-        filtered_set = set(line.strip() for line in open(output))
-        removed = raw_set - filtered_set
-        print(f"[DEBUG] Removed during filtering: {len(removed)} entries")
-        print(f"[DEBUG] Example removed entries: {list(removed)[:10]}")
+    print("[DEBUG] Normalization trace (raw_name → cleaned → normalized):")
+    for raw, cln, nrm in debug_examples:
+        print(f"  {raw:<40} → {cln:<28} → {nrm}")
 
-    print("[DONE] GENCODE cleaned")
-    return output
+    # ── Write output ──────────────────────────────────────────
+    output_path = os.path.join(PROC_DIR, "mirgenedb_norm.txt")
+    with open(output_path, "w") as fh:
+        for m in sorted(mirnas):
+            fh.write(m + "\n")
 
-
-# =========================
-# NORMALIZATION
-# =========================
-def normalize(name):
-    name = name.strip()
-
-    # remove species prefix
-    name = name.replace("hsa-", "")
-
-    # unify miR / let notation
-    name = name.replace("miR-", "mir")
-    name = name.replace("mir-", "mir")
-    name = name.replace("let-", "let")
-
-    # remove arm annotation (-5p / -3p)
-    name = re.sub(r'-[35]p$', '', name)
-
-    # remove any trailing isoform numbers like -1, -2 ONLY if duplicated (optional, keep for gene-level)
-    # name = re.sub(r'-\d+$', '', name)
-
-    # convert to uppercase gene-style nomenclature
-    name = name.upper()
-
-    return name
-
-
-def normalize_file(input_file, output_file):
-    print(f"[INFO] Applying normalization to: {input_file}")
-
-    # Identify dataset source for clearer messaging
-    if "gencode" in input_file.lower():
-        source_label = "GENCODE"
-    elif "mirbase" in input_file.lower():
-        source_label = "miRBase"
-    else:
-        source_label = "Unknown dataset"
-
-    print(f"[INFO] Step explanation: Normalizing miRNA names from {source_label} (removing species prefix, harmonizing naming, removing arm info, collapsing to gene-level).")
-
-    time.sleep(1)
-
-    dataset = set()
-
-    with open(input_file) as f:
-        for line in f:
-            norm = normalize(line.strip())
-            dataset.add(norm)
-
-    print("[INFO] Example normalization (first 10 entries):")
-    preview = list(dataset)[:10]
-    for item in preview:
-        print(item)
-
-    with open(output_file, "w") as out:
-        for m in sorted(dataset):
-            out.write(m + "\n")
-
-    print(f"[DONE] Normalized {source_label} miRNA names: {len(dataset)}")
-    return output_file, dataset
-
+    print(f"[DONE] miRGeneDB high-confidence miRNAs : {len(mirnas)}")
+    print(f"[OUTPUT] Saved to : {output_path}")
+    return output_path, mirnas
 
 # =========================
-# COMPARISON
+# STEP 9 — CROSS-DATABASE COMPARISON
 # =========================
-def compare(gencode_file, mirbase_file):
-    print("\n[STEP 6] Cross-database comparison...")
-    print("[STORY] We now compare gene-level miRNA identifiers between GENCODE and miRBase.")
-    print("[GOAL] Identify shared annotations and database-specific entries.")
+def compare_datasets(file_a, file_b, label_a, label_b, out_filename):
+    """
+    Generic pairwise comparison between two normalized miRNA sets.
+    Writes results to PROC_DIR/<out_filename>.
+    Returns (common, only_a, only_b) as sets.
+    """
+    set_a = set(open(file_a).read().split())
+    set_b = set(open(file_b).read().split())
+
+    common  = set_a & set_b
+    only_a  = set_a - set_b
+    only_b  = set_b - set_a
+
+    print(f"\n  {label_a:<12}: {len(set_a):>5}")
+    print(f"  {label_b:<12}: {len(set_b):>5}")
+    print(f"  Overlap      : {len(common):>5}")
+    print(f"  Only {label_a:<8}: {len(only_a):>5}")
+    print(f"  Only {label_b:<8}: {len(only_b):>5}")
+
+    output_path = os.path.join(PROC_DIR, out_filename)
+    with open(output_path, "w") as fh:
+        fh.write(f"# Comparison: {label_a} vs {label_b}\n\n")
+        fh.write(f"COMMON ({len(common)})\n")
+        fh.write("\n".join(sorted(common)) + "\n\n")
+        fh.write(f"ONLY_{label_a.upper()} ({len(only_a)})\n")
+        fh.write("\n".join(sorted(only_a)) + "\n\n")
+        fh.write(f"ONLY_{label_b.upper()} ({len(only_b)})\n")
+        fh.write("\n".join(sorted(only_b)) + "\n")
+
+    print(f"  [OUTPUT] Saved to: {output_path}")
+    return common, only_a, only_b
+
+def run_comparisons(gencode_norm_file, mirbase_norm_file, mirgenedb_norm_file,
+                    gencode_norm_set,  mirbase_norm_set,  mirgenedb_set):
+    print("\n" + "=" * 60)
+    print("[STEP 9] Cross-database comparisons")
+    print("=" * 60)
+    print("[STORY] Now that all three databases share the same naming convention,")
+    print("        we can perform meaningful set comparisons.")
+    print("[GOAL]  Identify which miRNAs are shared, database-specific, or universally supported.")
     time.sleep(2)
-    print("[INFO] Comparing datasets...")
-    print("[INFO] Step explanation: Comparing normalized miRNA sets to identify overlap and database-specific entries.")
-    time.sleep(1)
 
-    gencode = set(open(gencode_file).read().split())
-    mirbase = set(open(mirbase_file).read().split())
+    print("\n--- 9a. GENCODE vs miRBase ---")
+    print("[STORY] Both annotate human miRNAs from different angles (genomic vs sequence).")
+    print("[EXPECTATION] Substantial but incomplete overlap — each database has unique entries.")
+    compare_datasets(gencode_norm_file, mirbase_norm_file,
+                     "GENCODE", "miRBase", "overlap_gencode_vs_mirbase.txt")
 
-    common = gencode & mirbase
-    only_gencode = gencode - mirbase
-    only_mirbase = mirbase - gencode
+    print("\n--- 9b. GENCODE vs miRGeneDB ---")
+    print("[STORY] miRGeneDB is a strict evolutionary filter.")
+    print("[EXPECTATION] Most GENCODE miRNAs should overlap, but some low-confidence GENCODE")
+    print("              entries will not be found in miRGeneDB.")
+    compare_datasets(gencode_norm_file, mirgenedb_norm_file,
+                     "GENCODE", "miRGeneDB", "overlap_gencode_vs_mirgenedb.txt")
 
-    print("[INFO] Example overlap entries:")
-    print(list(common)[:10])
+    print("\n--- 9c. miRBase vs miRGeneDB ---")
+    print("[STORY] miRBase contains entries with variable confidence levels.")
+    print("[EXPECTATION] miRGeneDB validates a subset of miRBase entries.")
+    compare_datasets(mirbase_norm_file, mirgenedb_norm_file,
+                     "miRBase", "miRGeneDB", "overlap_mirbase_vs_mirgenedb.txt")
 
-    print("[INFO] Example GENCODE-only entries:")
-    print(list(only_gencode)[:10])
+    # --- Three-way high-confidence set ---
+    print("\n--- 9d. High-confidence set (GENCODE ∩ miRBase ∩ miRGeneDB) ---")
+    print("[STORY] The intersection of all three databases represents the most robust miRNA set:")
+    print("        annotated genomically (GENCODE), sequenced (miRBase), AND evolutionarily")
+    print("        validated (miRGeneDB).")
+    high_confidence = gencode_norm_set & mirbase_norm_set & mirgenedb_set
+    hc_path = os.path.join(PROC_DIR, "high_confidence_mirnas.txt")
+    with open(hc_path, "w") as fh:
+        for m in sorted(high_confidence):
+            fh.write(m + "\n")
+    print(f"  High-confidence miRNAs: {len(high_confidence)}")
+    print(f"  [OUTPUT] Saved to: {hc_path}")
 
-    print("[INFO] Example miRBase-only entries:")
-    print(list(only_mirbase)[:10])
-
-    print("[INFO] Note: GENCODE count may differ from raw parsed values due to filtering and normalization steps.")
-    print("\n=== FINAL RESULTS ===")
-    print(f"GENCODE: {len(gencode)}")
-    print(f"miRBase: {len(mirbase)}")
-    print(f"Overlap: {len(common)}")
-    print(f"Only GENCODE: {len(only_gencode)}")
-    print(f"Only miRBase: {len(only_mirbase)}")
-
-    output = f"{PROC_DIR}/final_overlap.txt"
-
-    with open(output, "w") as out:
-        out.write("COMMON\n")
-        out.write("\n".join(sorted(common)) + "\n\n")
-
-        out.write("ONLY_GENCODE\n")
-        out.write("\n".join(sorted(only_gencode)) + "\n\n")
-
-        out.write("ONLY_MIRBASE\n")
-        out.write("\n".join(sorted(only_mirbase)))
-
-    print(f"[OUTPUT] Saved to {output}")
-
+    return high_confidence
 
 # =========================
-# FIGURE 1 - VENN DIAGRAM
+# STEP 10 — VENN DIAGRAM
 # =========================
 def generate_venn_plot(gencode_set, mirbase_set):
-    print("\n[FIGURE 1] Generating Venn diagram (GENCODE vs miRBase)...")
-
-    output_fig = f"{PROC_DIR}/venn_mirna.png"
-
-    plt.figure(figsize=(6,6))
-    venn2([gencode_set, mirbase_set], set_labels=("GENCODE", "miRBase"))
-    plt.title("miRNA overlap: GENCODE vs miRBase")
-
-    plt.savefig(output_fig, dpi=300, bbox_inches="tight")
-    plt.close()
-
-    print(f"[DONE] Venn diagram saved to: {output_fig}")
-
-
-# =========================
-# QC REPORT
-# =========================
-def generate_qc_report(bed_file, fasta_file, gencode_set, mirbase_set):
-    print("\n[QC REPORT] Generating automatic quality control summary...")
+    print("\n" + "=" * 60)
+    print("[STEP 10] Generating Venn diagram (GENCODE vs miRBase)")
+    print("=" * 60)
+    print("[STORY] Visual summary of the two-database overlap after normalization.")
     time.sleep(1)
 
-    report_file = f"{PROC_DIR}/qc_report.txt"
+    output_fig = os.path.join(PROC_DIR, "venn_mirna.png")
+    plt.figure(figsize=(6, 6))
+    venn2([gencode_set, mirbase_set], set_labels=("GENCODE", "miRBase"))
+    plt.title("miRNA overlap: GENCODE vs miRBase (normalized)")
+    plt.savefig(output_fig, dpi=300, bbox_inches="tight")
+    plt.close()
+    print(f"[DONE] Venn diagram saved to: {output_fig}")
 
-    bed_count = sum(1 for _ in open(bed_file)) if os.path.exists(bed_file) else 0
+# =========================
+# STEP 11 — QC REPORT
+# =========================
+def generate_qc_report(bed_file, fasta_file, gencode_set, mirbase_set, mirgenedb_set):
+    print("\n" + "=" * 60)
+    print("[STEP 11] Generating QC report")
+    print("=" * 60)
+    time.sleep(1)
 
+    bed_count   = sum(1 for _ in open(bed_file)) if os.path.exists(bed_file) else 0
     fasta_count = 0
     bad_headers = 0
 
-    with open(fasta_file) as f:
-        for line in f:
-            if line.startswith(">"):
-                fasta_count += 1
-                h = line.strip().replace(">", "")
-                if not h.startswith("MIR") and not h.startswith("LET"):
-                    bad_headers += 1
+    if os.path.exists(fasta_file):
+        with open(fasta_file) as fh:
+            for line in fh:
+                if line.startswith(">"):
+                    fasta_count += 1
+                    h = line.strip().lstrip(">")
+                    if not h.startswith("MIR") and not h.startswith("LET"):
+                        bad_headers += 1
 
-    overlap = len(gencode_set & mirbase_set)
+    overlap_gc_mb  = len(gencode_set & mirbase_set)
+    overlap_gc_mgd = len(gencode_set & mirgenedb_set)
+    overlap_mb_mgd = len(mirbase_set & mirgenedb_set)
+    high_conf      = len(gencode_set & mirbase_set & mirgenedb_set)
 
-    with open(report_file, "w") as out:
-        out.write("QC REPORT - miRNA PIPELINE\n")
-        out.write("="*40 + "\n")
-        out.write(f"BED entries: {bed_count}\n")
-        out.write(f"FASTA sequences: {fasta_count}\n")
-        out.write(f"FASTA bad headers: {bad_headers}\n")
-        out.write(f"GENCODE-miRBase overlap: {overlap}\n")
+    report_path = os.path.join(PROC_DIR, "qc_report.txt")
+    with open(report_path, "w") as fh:
+        fh.write("QC REPORT — Integrative miRNA Annotation Pipeline\n")
+        fh.write("=" * 50 + "\n\n")
+        fh.write(f"BED unique loci              : {bed_count}\n")
+        fh.write(f"FASTA sequences extracted    : {fasta_count}\n")
+        fh.write(f"FASTA unexpected headers     : {bad_headers}\n\n")
+        fh.write(f"GENCODE miRNA symbols        : {len(gencode_set)}\n")
+        fh.write(f"miRBase miRNA symbols        : {len(mirbase_set)}\n")
+        fh.write(f"miRGeneDB curated symbols    : {len(mirgenedb_set)}\n\n")
+        fh.write(f"Overlap GENCODE ∩ miRBase    : {overlap_gc_mb}\n")
+        fh.write(f"Overlap GENCODE ∩ miRGeneDB  : {overlap_gc_mgd}\n")
+        fh.write(f"Overlap miRBase ∩ miRGeneDB  : {overlap_mb_mgd}\n")
+        fh.write(f"High-confidence (3-way)      : {high_conf}\n\n")
+        fh.write("INTERPRETATION\n")
+        fh.write("-" * 30 + "\n")
+        fh.write(f"FASTA normalization  : {'OK' if bad_headers == 0 else 'ISSUES DETECTED'}\n")
+        fh.write(f"Database agreement   : {'HIGH' if overlap_gc_mb > 1000 else 'MODERATE/LOW'}\n")
 
-        out.write("\nINTERPRETATION:\n")
-        if bad_headers == 0:
-            out.write("- FASTA normalization: OK\n")
-        else:
-            out.write("- FASTA normalization: ISSUES DETECTED\n")
-
-        if overlap > 1000:
-            out.write("- Database agreement: HIGH\n")
-        else:
-            out.write("- Database agreement: MODERATE/LOW\n")
-
-    print(f"[DONE] QC report saved to: {report_file}")
+    print(f"[DONE] QC report saved to: {report_path}")
 
 # =========================
-# MAIN PIPELINE
+# MAIN
 # =========================
 def main():
-    # Ensure working directory is project root
     os.chdir(BASE_DIR)
-    print("[DEBUG] Forced working directory to BASE_DIR:", os.getcwd())
-    print("\n" + "="*60)
-    print("[PIPELINE START] miRNA cross-database analysis")
-    print("="*60)
-    print("[STORY] We begin by gathering reference annotations from two major resources:")
-    print("[STORY] - GENCODE: comprehensive genome annotation (gene-centric)")
-    print("[STORY] - miRBase: curated miRNA sequences (sequence-centric)")
-    time.sleep(2)
+
+    print("\n" + "=" * 60)
+    print("[PIPELINE START] Integrative miRNA Annotation Pipeline")
+    print("=" * 60)
+    print("[OBJECTIVE] Define a high-confidence set of human miRNA genes by integrating")
+    print("            genomic annotation, sequence databases, and evolutionary curation.")
+    print()
+    print("[DATABASES]")
+    print("  1. GENCODE   — genomic loci (GTF)")
+    print("  2. miRBase   — mature miRNA sequences (FASTA)")
+    print("  3. miRGeneDB — evolutionarily validated miRNA genes (BED)")
+    print()
+    print("[WORKFLOW]")
+    print("  Acquire → Parse → Normalize → Compare → Validate → Curate → Report")
+    time.sleep(3)
 
     ensure_dirs()
     debug_paths()
-    
-    print("\n[STEP 1] Acquiring GENCODE annotation...")
-    print("[INFO] GENCODE GTF contains genomic coordinates, gene/transcript structure, and biotypes (e.g., miRNA).")
-    print("[INFO] It provides gene-level annotation, not mature miRNA sequences or targeting data.")
-    time.sleep(2)
 
-    # =========================
-    # DOWNLOAD SECTION
-    # =========================
-    download_file(GENCODE_URL, GENCODE_GTF)
-    download_file(MIRBASE_URL, MIRBASE_FA)
-    download_file(MIRGENEDB_URL, MIRGENEDB_FILE)
+    # ── Steps ──────────────────────────────────────────────────
+    acquire_data()                                          # Step 1
 
-    print("\n[STEP 2] Acquiring miRBase data...")
-    print("[INFO] miRBase provides mature miRNA sequences (including -5p and -3p arms).")
-    print("[INFO] It does NOT provide target genes or affinity data.")
-    print("[INFO] It focuses on sequence-level annotation, not genomic structure.")
-    time.sleep(2)
+    gencode_raw_file, raw_set  = parse_gencode()           # Step 2
+    bed_file                   = generate_bed_from_gencode()  # Step 3
+    mirbase_raw_file, _        = parse_mirbase()           # Step 4
+    output_fa                  = extract_sequences(bed_file)  # Step 5
 
-    mirbase_gz = f"{RAW_DIR}/mature.fa.gz"
+    gencode_norm_file, gencode_norm_set = clean_and_normalize_gencode(gencode_raw_file, raw_set)  # Step 6
+    mirbase_norm_file, mirbase_norm_set = normalize_mirbase(mirbase_raw_file)                      # Step 7
+    mirgenedb_norm_file, mirgenedb_set  = parse_mirgenedb()                                        # Step 8
 
-    if os.path.exists(mirbase_gz):
-        print("[SKIP] Using existing miRBase gzip file")
-    elif os.path.exists(MIRBASE_FA):
-        print("[SKIP] Using existing miRBase FASTA file")
-    else:
-        print("[INFO] miRBase file not found, attempting download (FASTA)...")
-        download_file(MIRBASE_URL, MIRBASE_FA)
-
-    # =========================
-    # DATA INTEGRITY CHECKPOINT
-    # =========================
-    print("\n[CHECKPOINT] Validating downloaded files...")
-
-    def check_file(path, min_size_mb=None):
-        if not os.path.exists(path):
-            print(f"[ERROR] Missing file: {path}")
-            return False
-
-        size_mb = os.path.getsize(path) / (1024 * 1024)
-
-        if min_size_mb is not None and size_mb < min_size_mb:
-            print(f"[ERROR] File too small ({size_mb:.2f} MB): {path}")
-            return False
-
-        print(f"[OK] {path} ({size_mb:.2f} MB)")
-        return True
-
-
-    check_file(GENCODE_GTF)
-    check_file(MIRBASE_FA)
-    check_file(MIRGENEDB_FILE)
-    # ---- PARSE ----
-    gencode_raw_file, raw_set = parse_gencode()
-    bed_file = generate_bed_from_gencode()
-    # Deduplicate BED entries
-    print("[INFO] Collapsing BED entries to unique coordinates (removing duplicates)...")
-    print("[STORY] GENCODE provides multiple entries per miRNA due to transcripts and feature annotations.")
-    print("[PROBLEM] This creates duplicated genomic coordinates for the same miRNA gene.")
-    print("[IMPACT] If not corrected, sequence extraction would produce redundant sequences and inflate downstream analyses.")
-    print("[SOLUTION] We collapse entries to retain unique genomic loci (CHR, START, END, GENE_NAME).")
-    print("[BIOLOGICAL CONTEXT] This step converts transcript-level annotation into gene-level representation.")
-    time.sleep(2)
-
-    unique_bed = f"{PROC_DIR}/mirna_coordinates_unique.bed"
-    seen = set()
-    with open(bed_file) as f, open(unique_bed, "w") as out:
-        for line in f:
-            key = tuple(line.strip().split("\t")[:4])  # chr, start, end, name
-            if key not in seen:
-                seen.add(key)
-                out.write(line)
-    print(f"[DONE] Unique BED entries: {len(seen)}")
-    print("[INTERPRETATION] This number represents distinct miRNA genomic loci after removing redundant annotations.")
-    print("[EXPECTATION] This value should approximate the number of annotated miRNA genes in GENCODE (~1800-1900).")
-    # update bed_file to use the deduplicated version
-    bed_file = unique_bed
-    mirbase_raw = parse_mirbase()
-
-    # SEQUENCE EXTRACTION STEP
-    print("\n[STEP 4.5] Extracting genomic miRNA sequences...")
-    print("[STORY] We now move from annotation to sequence-level data.")
-    print("[STORY] Using genomic coordinates from GENCODE, we retrieve the underlying DNA sequences.")
-    print("[INFO] This step uses BEDTOOLS to map miRNA loci back to the reference genome.")
-    print("[INFO] Output: FASTA file containing genomic miRNA sequences.")
-    time.sleep(2)
-
-    # ---- CHECK BEDTOOLS ----
-    import shutil
-    if not shutil.which("bedtools"):
-        print("[ERROR] bedtools is not installed or not in PATH.")
-        print("👉 Install with: brew install bedtools")
-        exit()
-
-    print("[INFO] bedtools detected ✔")
-
-    # ---- CHECK REQUIRED FILES ----
-    # bed_file already defined and deduplicated above
-    genome_fa = f"{RAW_DIR}/genome.fa"
-    genome_gz = f"{RAW_DIR}/genome.fa.gz"
-
-    print("[INFO] Checking required input files...")
-    print(f"  BED: {bed_file}")
-    print(f"  Genome FA: {genome_fa}")
-    print(f"  Genome GZ: {genome_gz}")
-    print("[INFO] BED file should now exist from previous generation step.")
-
-    if not os.path.exists(bed_file):
-        print(f"[ERROR] BED file not found: {bed_file}")
-        print("👉 This should be generated in previous steps.")
-        exit()
-
-    # ---- HANDLE GENOME ----
-
-    if os.path.exists(genome_fa):
-        print("[SKIP] genome.fa already exists ✔")
-
-    elif os.path.exists(genome_gz):
-        print("[INFO] genome.fa not found, decompressing genome.fa.gz...")
-        subprocess.run(["gunzip", genome_gz], check=True)
-        print("[DONE] genome.fa ready ✔")
-
-    else:
-        print("[ERROR] Genome file not found.")
-        print("👉 Expected:")
-        print(f"   {genome_fa}")
-        print("   OR")
-        print(f"   {genome_gz}")
-        exit()
-
-    # ---- RUN EXTRACTION SCRIPT ----
-    print("[STORY] Extracting strand-aware sequences (-s) and preserving miRNA names (-name).")
-    time.sleep(1)
-
-    # ---- CHECK POINT OF BEDTOOLS ----
-
-    output_fa = f"{PROC_DIR}/mirna_sequences.fa"
-
-    print(f"[INFO] Output FASTA: {output_fa}")
-    print("[INFO] Running BEDTOOLS getfasta...")
-
-    cmd = [
-        "bedtools", "getfasta",
-        "-fi", genome_fa,
-        "-bed", bed_file,
-        "-fo", output_fa,
-        "-nameOnly",
-        "-s"
-    ]
-
-    try:
-        subprocess.run(cmd, check=True)
-        print("[DONE] Sequence extraction completed successfully ✔")
-    except subprocess.CalledProcessError:
-        print("[ERROR] BEDTOOLS execution failed.")
-        print("👉 Check genome file, BED format, and installation.")
-        exit()
-
-    # =========================
-    # FASTA VALIDATION
-    # =========================
-    print("\n[FASTA VALIDATION]")
-    print("[INFO] Validating extracted miRNA FASTA file...")
-
-    seq_count = 0
-    bad_headers = 0
-
-    with open(output_fa) as f:
-        for line in f:
-            if line.startswith(">"):
-                seq_count += 1
-                header = line.strip().replace(">", "")
-                if not header.startswith("MIR") and not header.startswith("LET"):
-                    bad_headers += 1
-
-    print(f"[RESULT] Total sequences: {seq_count}")
-    print(f"[RESULT] Headers not normalized (unexpected): {bad_headers}")
-
-    if bad_headers == 0:
-        print("[SUCCESS] All FASTA headers are correctly normalized (MIR/LET format)")
-    else:
-        print("[WARNING] Some FASTA headers are not normalized. Check BED generation step.")
-
-    # ---- POST EXTRACTION SUMMARY ----
-    time.sleep(1)
-    print("\n[STORY] We now have three complementary biological layers:")
-    print("  1. Genomic annotation (GENCODE)")
-    print("  2. Mature miRNA sequences (miRBase)")
-    print("  3. Genomic DNA sequences (BEDTOOLS extraction)")
-    time.sleep(2)
-    print("\n[STEP 4.5] Extracting genomic miRNA sequences...")
-    print("[STORY] We now move from annotation to sequence-level data.")
-    print("[STORY] Using genomic coordinates from GENCODE, we retrieve the underlying DNA sequences.")
-    print("[INFO] This step uses BEDTOOLS to map miRNA loci back to the reference genome.")
-    print("[INFO] Output: FASTA file containing genomic miRNA sequences.")
-    time.sleep(2)
-
-    time.sleep(1)
-    print("[STORY] We now have three complementary layers:")
-    print("- Genomic annotation (GENCODE)")
-    print("- Mature miRNA sequences (miRBase)")
-    print("- Genomic DNA sequences (BEDTOOLS extraction)")
-    time.sleep(2)
-
-    print("[STORY] At this point:")
-    print("- GENCODE → gene-level miRNA annotation")
-    print("- miRBase → mature miRNA sequences (5p/3p variants)")
-    print("[STORY] Neither database directly provides miRNA target interactions.")
-    print("[STORY] For that, databases like TargetScan, miRTarBase, or TarBase are required.")
-    time.sleep(3)
-
-    # ---- CLEAN ----
-    gencode_clean = clean_gencode(gencode_raw_file, raw_set)
-
-    # ---- NORMALIZE ----
-    print("\n[STEP 5] Normalization of miRNA identifiers...")
-    print("[PROBLEM] GENCODE and miRBase use different naming conventions.")
-    print("[EXAMPLE]")
-    print("  GENCODE: MIR21")
-    print("  miRBase: hsa-miR-21-5p")
-    print("[ISSUE] These refer to the same biological entity but appear different computationally.")
-    print("[SOLUTION] We normalize names to a unified gene-level nomenclature (uppercase MIR/LET format).")
-    print("[TRANSFORMATION EXAMPLES | Gene-level harmonization]")
-    print("  hsa-miR-21-5p  →  MIR21")
-    print("  hsa-let-7g-3p →  LET7G")
-    print("  MIR1302-2     →  MIR1302-2")
-    time.sleep(3)
-
-    gencode_norm_file, gencode_norm_set = normalize_file(
-        gencode_clean,
-        f"{PROC_DIR}/gencode_norm.txt"
+    high_confidence = run_comparisons(                     # Step 9
+        gencode_norm_file, mirbase_norm_file, mirgenedb_norm_file,
+        gencode_norm_set,  mirbase_norm_set,  mirgenedb_set,
     )
 
-    mirbase_norm_file, mirbase_norm_set = normalize_file(
-        mirbase_raw,
-        f"{PROC_DIR}/mirbase_norm.txt"
+    generate_venn_plot(gencode_norm_set, mirbase_norm_set)  # Step 10
+    generate_qc_report(                                     # Step 11
+        bed_file, output_fa,
+        gencode_norm_set, mirbase_norm_set, mirgenedb_set,
     )
 
-    # ---- COMPARE ----
-    compare(gencode_norm_file, mirbase_norm_file)
-
-    # =========================
-    # FIGURE GENERATION
-    # =========================
-    generate_venn_plot(gencode_norm_set, mirbase_norm_set)
-
-    # =========================
-    # FINAL OUTPUT SUMMARY TABLE
-    # =========================
-    print("\n[FINAL SUMMARY TABLE]")
-
-    header = f"{'Process':<25}{'Output File':<50}{'Description'}"
-    print(header)
-    print("-" * len(header))
-
+    # ── Final summary table ────────────────────────────────────
+    print("\n" + "=" * 60)
+    print("[FINAL OUTPUT SUMMARY]")
+    print("=" * 60)
     rows = [
-        ("GENCODE parsing", gencode_raw_file, "Raw miRNA gene names from GENCODE"),
-        ("BED generation", bed_file, "Genomic coordinates of miRNA loci (deduplicated)"),
-        ("miRBase parsing", mirbase_raw, "Human mature miRNAs (hsa)"),
-        ("Sequence extraction", output_fa, "Genomic miRNA sequences (FASTA)"),
-        ("GENCODE cleaned", gencode_clean, "Filtered canonical miRNA genes (mir/let)"),
-        ("GENCODE normalized", gencode_norm_file, "Gene-level normalized miRNA names"),
-        ("miRBase normalized", mirbase_norm_file, "Normalized miRNA names"),
-        ("Final overlap", f"{PROC_DIR}/final_overlap.txt", "Shared and unique miRNAs")
+        ("Step 2 – GENCODE parse",    "gencode_mirna.txt",                  "Raw miRNA gene symbols"),
+        ("Step 3 – BED (unique)",     "mirna_coordinates_unique.bed",       "Deduplicated genomic loci"),
+        ("Step 4 – miRBase parse",    "mirbase_hsa.txt",                    "Human mature miRNA names"),
+        ("Step 5 – Sequences",        "mirna_sequences.fa",                 "Genomic miRNA sequences (FASTA)"),
+        ("Step 6 – GENCODE norm",     "gencode_norm.txt",                   "Normalized GENCODE symbols"),
+        ("Step 7 – miRBase norm",     "mirbase_norm.txt",                   "Normalized miRBase symbols"),
+        ("Step 8 – miRGeneDB norm",   "mirgenedb_norm.txt",                 "Curated & normalized symbols"),
+        ("Step 9a – Overlap GC/MB",   "overlap_gencode_vs_mirbase.txt",     "GENCODE ∩ miRBase"),
+        ("Step 9b – Overlap GC/MGD",  "overlap_gencode_vs_mirgenedb.txt",   "GENCODE ∩ miRGeneDB"),
+        ("Step 9c – Overlap MB/MGD",  "overlap_mirbase_vs_mirgenedb.txt",   "miRBase ∩ miRGeneDB"),
+        ("Step 9d – High-confidence", "high_confidence_mirnas.txt",         "3-way intersection"),
+        ("Step 10 – Venn diagram",    "venn_mirna.png",                     "GENCODE vs miRBase overlap"),
+        ("Step 11 – QC report",       "qc_report.txt",                      "Pipeline quality metrics"),
     ]
+    print(f"  {'Step':<28} {'File':<42} {'Description'}")
+    print("  " + "-" * 100)
+    for step, fname, desc in rows:
+        print(f"  {step:<28} {fname:<42} {desc}")
 
-    for process, file, desc in rows:
-        print(f"{process:<25}{file:<50}{desc}")
-
-    # =========================
-    # QC REPORT CALL
-    # =========================
-    generate_qc_report(
-        bed_file,
-        output_fa,
-        gencode_norm_set,
-        mirbase_norm_set
-    )
-
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("[PIPELINE COMPLETE]")
-    print("[SUMMARY]")
-    print("- GENCODE: gene-level annotation (no sequences)")
-    print("- miRBase: mature miRNA sequences (5p/3p)")
-    print("- Neither provides miRNA-target interaction data")
-    print("- Additional resources needed: TargetScan, miRTarBase, TarBase")
-    print("="*60)
+    print("[RESULTS]")
+    print(f"  High-confidence miRNAs (3-way): {len(high_confidence)}")
+    print()
+    print("[BIOLOGICAL CONCLUSIONS]")
+    print("  • GENCODE provides genomic loci but no mature sequences")
+    print("  • miRBase provides sequences but includes variable-confidence entries")
+    print("  • miRGeneDB filters both to a biologically validated core set")
+    print("  • The 3-way intersection is the most robust set for downstream analysis")
+    print()
+    print("[NEXT STEPS]")
+    print("  • Integrate target databases: TargetScan, miRTarBase, TarBase")
+    print("  • Add expression data from RNA-seq / small RNA-seq")
+    print("  • Extend analysis to additional species")
+    print("=" * 60)
 
 
 if __name__ == "__main__":
