@@ -1005,13 +1005,636 @@ def generate_venn_plot(gencode_set, mirbase_set, mirgenedb_set, crossref_records
         plt.close()
         print(f"[DONE] Fig B (MIMAT-based) saved to: {output_fig_b}")
 
+
 # =========================
-# STEP 11 — QC REPORT
+# STEP 11 — CHROMOSOMAL MAP
+# =========================
+def generate_chromosomal_map(bed_file):
+    """
+    Generate two chromosomal map figures:
+
+    Fig 1 — mirna_chromosomal_map.png
+        Full genome view: all 24 chromosomes as scaled bars with
+        miRNA loci overlaid as colored ticks. Color = density.
+
+    Fig 2 — mirna_chromosomal_zoom.png
+        Detailed view of chr1, chr19, chrX, chrY with density barplot.
+    """
+    print("\n" + "=" * 60)
+    print("[STEP 11] Generating chromosomal distribution maps")
+    print("=" * 60)
+    print("[STORY] Visualizing all miRNA loci across GRCh38 chromosomes.")
+    time.sleep(1)
+
+    import matplotlib.patches as mpatches
+    from matplotlib.colors import Normalize
+    import matplotlib.cm as cm
+
+    CHR_ORDER = [f"chr{i}" for i in range(1, 23)] + ["chrX", "chrY"]
+    CHR_SIZES = {
+        "chr1":  248956422, "chr2":  242193529, "chr3":  198295559,
+        "chr4":  190214555, "chr5":  181538259, "chr6":  170805979,
+        "chr7":  159345973, "chr8":  145138636, "chr9":  138394717,
+        "chr10": 133797422, "chr11": 135086622, "chr12": 133275309,
+        "chr13": 114364328, "chr14": 107043718, "chr15": 101991189,
+        "chr16":  90338345, "chr17":  83257441, "chr18":  80373285,
+        "chr19":  58617616, "chr20":  64444167, "chr21":  46709983,
+        "chr22":  50818468, "chrX":  156040895, "chrY":   57227415,
+    }
+
+    # ── Parse BED ──
+    loci = {c: [] for c in CHR_ORDER}
+    with open(bed_file) as fh:
+        for line in fh:
+            cols = line.strip().split("\t")
+            if len(cols) < 4:
+                continue
+            chrom = cols[0]
+            name  = cols[3]
+            if chrom not in loci:
+                continue
+            if not (name.startswith("MIR") or name.startswith("LET")):
+                continue   # skip non canonical entries
+            mid = (int(cols[1]) + int(cols[2])) / 2
+            loci[chrom].append(mid)
+
+    total     = sum(len(v) for v in loci.values())
+    max_count = max(len(v) for v in loci.values())
+    cmap      = plt.colormaps["YlOrRd"]
+    norm      = Normalize(vmin=0, vmax=max_count)
+
+    # ══════════════════════════════════════════════════
+    # FIG 1 — Full genome map
+    # ══════════════════════════════════════════════════
+    # ── Layout: 2 columns, 12 rows each, chromosomes VERTICAL ──
+    max_size  = max(CHR_SIZES.values())
+    left_chrs  = CHR_ORDER[:12]    # chr1–chr12
+    right_chrs = CHR_ORDER[12:]    # chr13–chrY
+
+    BAR_W   = 0.38   # chromosome bar width
+    COL_H   = 10.0   # max bar height (scaled)
+    ROW_W   = 1.0    # horizontal spacing per chromosome
+    COL_GAP = 14.0   # gap between left and right column
+    LABEL_H = 0.8    # space for label below
+
+    fig_w  = 2 * (len(left_chrs) * ROW_W) + COL_GAP * 0.5
+    fig_h  = COL_H + 3.0
+    fig1, ax = plt.subplots(figsize=(fig_w, fig_h))
+    ax.set_xlim(-1.5, COL_GAP + len(right_chrs) * ROW_W + 1)
+    ax.set_ylim(-LABEL_H - 0.5, COL_H + 1.5)
+    ax.axis("off")
+
+    def draw_chr_vertical(chrom, col_offset, col_idx):
+        size      = CHR_SIZES[chrom]
+        positions = loci[chrom]
+        bar_h     = (size / max_size) * COL_H
+        color     = cmap(norm(len(positions)))
+
+        x0 = col_offset + col_idx * ROW_W
+        y0 = 0   # bars start from bottom
+
+        # Chromosome bar (vertical, rounded)
+        rect = mpatches.FancyBboxPatch(
+            (x0 - BAR_W / 2, y0), BAR_W, bar_h,
+            boxstyle="round,pad=0.06",
+            linewidth=0.4, edgecolor="#9BA8B5",
+            facecolor="#E2E8F0", zorder=1
+        )
+        ax.add_patch(rect)
+
+        # miRNA ticks (horizontal, to the right of bar)
+        for pos in positions:
+            y = y0 + (pos / size) * bar_h
+            ax.plot([x0 + BAR_W * 0.45, x0 + BAR_W * 1.3],
+                    [y, y],
+                    color=color, lw=0.55, alpha=0.75, zorder=2)
+
+        # Chromosome label (below bar)
+        label = chrom.replace("chr", "")
+        ax.text(x0, y0 - 0.25, label,
+                ha="center", va="top",
+                fontsize=16, fontweight="bold", color="#1A2530")
+
+        # Count label (above bar)
+        ax.text(x0, y0 + bar_h + 0.15, str(len(positions)),
+                ha="center", va="bottom",
+                fontsize=16, fontweight="bold", color="#333")
+
+    for i, chrom in enumerate(left_chrs):
+        draw_chr_vertical(chrom, 0, i)
+    for i, chrom in enumerate(right_chrs):
+        draw_chr_vertical(chrom, COL_GAP, i)
+
+    ax.set_title(
+        f"Genomic distribution of miRNA loci — GENCODE v49  (n = {total})\n"
+        "GRCh38  |  Each tick = one miRNA gene  |  Color intensity = loci count",
+        fontsize=18, fontweight="bold", color="#1A2530", pad=12
+    )
+
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    fig1.colorbar(sm, ax=ax, orientation="vertical",
+                  fraction=0.015, pad=0.02,
+                  label="miRNA loci per chromosome")
+
+    out1 = os.path.join(PROC_DIR, "mirna_chromosomal_map.png")
+    fig1.savefig(out1, dpi=300, bbox_inches="tight",
+                 facecolor="white", edgecolor="none")
+    plt.close(fig1)
+    print(f"[DONE] Full genome map saved to: {out1}")
+
+    # ══════════════════════════════════════════════════
+    # FIG 2 — Zoom: chr1, chr19, chrX, chrY
+    # ══════════════════════════════════════════════════
+    zoom_chrs = ["chr1", "chr19", "chrX", "chrY"]
+    BIN_N     = 150
+    fig2, axes2 = plt.subplots(
+        nrows=len(zoom_chrs), ncols=1,
+        figsize=(12, len(zoom_chrs) * 2.0),
+        gridspec_kw={"hspace": 0.7}
+    )
+
+    for ax, chrom in zip(axes2, zoom_chrs):
+        size      = CHR_SIZES[chrom]
+        positions = loci[chrom]
+        color     = cmap(norm(len(positions)))
+
+        ax_dens = ax.inset_axes([0, 0.52, 1, 0.44])
+        ax_ideo = ax
+
+        # Density histogram
+        counts = [0] * BIN_N
+        for pos in positions:
+            idx = min(int(pos / size * BIN_N), BIN_N - 1)
+            counts[idx] += 1
+        bin_mids = [(i + 0.5) * size / BIN_N for i in range(BIN_N)]
+        ax_dens.bar(bin_mids, counts,
+                    width=size / BIN_N * 0.9,
+                    color=color, alpha=0.85, linewidth=0)
+        ax_dens.set_xlim(0, size)
+        ax_dens.set_ylabel("Count", fontsize=7, color="#444")
+        ax_dens.tick_params(axis="y", labelsize=6)
+        ax_dens.tick_params(axis="x", bottom=False, labelbottom=False)
+        ax_dens.spines[["top","right","bottom"]].set_visible(False)
+        ax_dens.set_title(
+            f"{chrom}  —  {len(positions)} miRNA loci",
+            fontsize=9, fontweight="bold", color="#1A2530", pad=3
+        )
+
+        # Chromosome bar
+        ax_ideo.set_xlim(0, size)
+        ax_ideo.set_ylim(-1, 1.2)
+        ax_ideo.axis("off")
+        rect = mpatches.FancyBboxPatch(
+            (0, -0.35), size, 0.7,
+            boxstyle="round,pad=0.02",
+            linewidth=0.5, edgecolor="#9BA8B5",
+            facecolor="#E2E8F0", zorder=1,
+            transform=ax_ideo.transData
+        )
+        ax_ideo.add_patch(rect)
+
+        # Mb scale
+        for mb in range(0, size, 20_000_000):
+            ax_ideo.text(mb, -0.6, f"{mb//1_000_000}Mb",
+                         ha="center", va="top",
+                         fontsize=5.5, color="#777")
+
+        # Ticks
+        for pos in positions:
+            ax_ideo.plot([pos, pos], [0.37, 1.0],
+                         color=color, lw=0.8, alpha=0.7, zorder=2)
+
+    fig2.suptitle(
+        "miRNA loci density — chr1, chr19, chrX, chrY\nGENCODE v49 | GRCh38",
+        fontsize=11, fontweight="bold", color="#1A2530"
+    )
+    out2 = os.path.join(PROC_DIR, "mirna_chromosomal_zoom.png")
+    fig2.savefig(out2, dpi=300, bbox_inches="tight",
+                 facecolor="white", edgecolor="none")
+    plt.close(fig2)
+    print(f"[DONE] Zoom map saved to: {out2}")
+    return out1, out2
+
+
+# =========================
+# STEP 13 — DISTRIBUTION PLOTS
+# =========================
+def generate_distribution_plots(bed_file):
+    """
+    Generate two complementary distribution analyses:
+
+    Fig 1 — mirna_density_normalized.png
+        miRNA loci per Mb for each chromosome.
+        Corrects for chromosome size — reveals chr19 as an outlier.
+
+    Fig 2 — mirna_strand_distribution.png
+        Proportion of + vs - strand miRNA loci per chromosome.
+        Tests whether there is a strand bias.
+    """
+    print("\n" + "=" * 60)
+    print("[STEP 13] Generating distribution analysis plots")
+    print("=" * 60)
+    print("[STORY] Beyond raw counts, we ask: which chromosomes are enriched")
+    print("        for miRNAs relative to their size? And is there strand bias?")
+    time.sleep(1)
+
+    CHR_ORDER = [f"chr{i}" for i in range(1, 23)] + ["chrX", "chrY"]
+    CHR_SIZES_MB = {
+        "chr1":  248.9, "chr2":  242.2, "chr3":  198.3, "chr4":  190.2,
+        "chr5":  181.5, "chr6":  170.8, "chr7":  159.3, "chr8":  145.1,
+        "chr9":  138.4, "chr10": 133.8, "chr11": 135.1, "chr12": 133.3,
+        "chr13": 114.4, "chr14": 107.0, "chr15": 102.0, "chr16":  90.3,
+        "chr17":  83.3, "chr18":  80.4, "chr19":  58.6, "chr20":  64.4,
+        "chr21":  46.7, "chr22":  50.8, "chrX":  156.0, "chrY":   57.2,
+    }
+
+    # Parse BED
+    counts     = {c: 0   for c in CHR_ORDER}
+    strand_pos = {c: 0   for c in CHR_ORDER}
+    strand_neg = {c: 0   for c in CHR_ORDER}
+
+    with open(bed_file) as fh:
+        for line in fh:
+            cols = line.strip().split("\t")
+            if len(cols) < 6:
+                continue
+            chrom, name, strand = cols[0], cols[3], cols[5]
+            if chrom not in counts:
+                continue
+            if not (name.startswith("MIR") or name.startswith("LET")):
+                continue
+            counts[chrom] += 1
+            if strand == "+":
+                strand_pos[chrom] += 1
+            else:
+                strand_neg[chrom] += 1
+
+    labels    = [c.replace("chr", "") for c in CHR_ORDER]
+    densities = [counts[c] / CHR_SIZES_MB[c] for c in CHR_ORDER]
+    total_loci = sum(counts.values())
+
+    # ── Color by density ──
+    cmap   = plt.colormaps["YlOrRd"]
+    max_d  = max(densities)
+    colors = [cmap(d / max_d) for d in densities]
+
+    # ══════════════════════════════════════════════════
+    # FIG 1 — Normalized density (loci per Mb)
+    # ══════════════════════════════════════════════════
+    fig1, ax1 = plt.subplots(figsize=(14, 5))
+
+    bars = ax1.bar(labels, densities, color=colors, edgecolor="white",
+                   linewidth=0.5, zorder=2)
+
+    # Highlight chr19 and chrX as outliers
+    for i, chrom in enumerate(CHR_ORDER):
+        if chrom in ("chr19", "chrX"):
+            bars[i].set_edgecolor("#1A2530")
+            bars[i].set_linewidth(1.5)
+
+    # Value labels on top of each bar
+    for bar, d in zip(bars, densities):
+        ax1.text(bar.get_x() + bar.get_width() / 2,
+                 bar.get_height() + 0.02,
+                 f"{d:.1f}",
+                 ha="center", va="bottom",
+                 fontsize=6.5, color="#333")
+
+    ax1.set_xlabel("Chromosome", fontsize=11, labelpad=8)
+    ax1.set_ylabel("miRNA loci per Mb", fontsize=11, labelpad=8)
+    ax1.set_title(
+        f"miRNA gene density per chromosome — GENCODE v49  (n = {total_loci})\n"
+        "Normalized by chromosome size (Mb)  |  GRCh38",
+        fontsize=12, fontweight="bold", color="#1A2530", pad=10
+    )
+    ax1.set_xticks(range(len(labels)))
+    ax1.set_xticklabels(labels, fontsize=9)
+    ax1.tick_params(axis="y", labelsize=9)
+    ax1.spines[["top", "right"]].set_visible(False)
+    ax1.grid(axis="y", linestyle="--", alpha=0.4, zorder=1)
+
+    # Median line
+    median_d = sorted(densities)[len(densities)//2]
+    ax1.axhline(median_d, color="#4C72B0", linestyle="--",
+                lw=1.2, alpha=0.7, label=f"Median: {median_d:.1f} loci/Mb")
+    ax1.legend(fontsize=9, framealpha=0.8)
+
+    # Annotation for chr19
+    idx19 = CHR_ORDER.index("chr19")
+    ax1.annotate(
+        "chr19: highest density\n(small but gene-rich)",
+        xy=(idx19, densities[idx19]),
+        xytext=(idx19 - 3, densities[idx19] * 0.88),
+        fontsize=8, color="#962020", fontweight="bold",
+        arrowprops=dict(arrowstyle="->", color="#962020", lw=1.1),
+        bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="#962020", alpha=0.85)
+    )
+
+    out1 = os.path.join(PROC_DIR, "mirna_density_normalized.png")
+    fig1.tight_layout()
+    fig1.savefig(out1, dpi=300, bbox_inches="tight",
+                 facecolor="white", edgecolor="none")
+    plt.close(fig1)
+    print(f"[DONE] Normalized density plot saved to: {out1}")
+
+    # ══════════════════════════════════════════════════
+    # FIG 2 — Strand distribution per chromosome
+    # ══════════════════════════════════════════════════
+    fig2, (ax2a, ax2b) = plt.subplots(2, 1, figsize=(14, 8),
+                                       gridspec_kw={"hspace": 0.45})
+
+    # Top panel: stacked bar (absolute counts)
+    pos_counts = [strand_pos[c] for c in CHR_ORDER]
+    neg_counts = [strand_neg[c] for c in CHR_ORDER]
+
+    x = range(len(labels))
+    ax2a.bar(x, pos_counts, label="+ strand", color="#4C72B0",
+             alpha=0.85, edgecolor="white", linewidth=0.4)
+    ax2a.bar(x, neg_counts, bottom=pos_counts, label="− strand",
+             color="#C44E52", alpha=0.85, edgecolor="white", linewidth=0.4)
+    ax2a.set_xticks(x)
+    ax2a.set_xticklabels(labels, fontsize=9)
+    ax2a.set_ylabel("miRNA loci count", fontsize=10)
+    ax2a.set_title("miRNA strand distribution — absolute counts",
+                   fontsize=11, fontweight="bold", color="#1A2530")
+    ax2a.spines[["top", "right"]].set_visible(False)
+    ax2a.legend(fontsize=9, framealpha=0.8)
+    ax2a.grid(axis="y", linestyle="--", alpha=0.35)
+
+    # Bottom panel: proportions (+ fraction)
+    pos_frac = [strand_pos[c] / max(counts[c], 1) for c in CHR_ORDER]
+    neg_frac = [1 - f for f in pos_frac]
+
+    ax2b.bar(x, pos_frac, label="+ strand", color="#4C72B0",
+             alpha=0.85, edgecolor="white", linewidth=0.4)
+    ax2b.bar(x, neg_frac, bottom=pos_frac, label="− strand",
+             color="#C44E52", alpha=0.85, edgecolor="white", linewidth=0.4)
+    ax2b.axhline(0.5, color="#1A2530", linestyle="--",
+                 lw=1.0, alpha=0.6, label="50% reference")
+    ax2b.set_xticks(x)
+    ax2b.set_xticklabels(labels, fontsize=9)
+    ax2b.set_ylabel("Proportion", fontsize=10)
+    ax2b.set_ylim(0, 1)
+    ax2b.set_title("miRNA strand distribution — proportions (+ vs - strand)",
+                   fontsize=11, fontweight="bold", color="#1A2530")
+    ax2b.spines[["top", "right"]].set_visible(False)
+    ax2b.legend(fontsize=9, framealpha=0.8)
+
+    # Annotate chromosomes with strong strand bias
+    # Requires: >70% one strand AND at least 20 loci (avoids false positives
+    # on chromosomes with few miRNAs like chrY)
+    for i, chrom in enumerate(CHR_ORDER):
+        f = pos_frac[i]
+        n = counts[chrom]
+        if n < 20:
+            continue
+        if f > 0.70:
+            ax2b.annotate(
+                f"+ bias\n({f*100:.0f}%)",
+                xy=(i, f), xytext=(i, 1.05),
+                ha="center", va="bottom", fontsize=7,
+                fontweight="bold", color="#2A5FA5",
+                arrowprops=dict(arrowstyle="-", color="#2A5FA5",
+                                lw=0.8, alpha=0.6),
+            )
+        elif f < 0.30:
+            ax2b.annotate(
+                f"- bias\n({(1-f)*100:.0f}%)",
+                xy=(i, f), xytext=(i, 1.05),
+                ha="center", va="bottom", fontsize=7,
+                fontweight="bold", color="#962020",
+                arrowprops=dict(arrowstyle="-", color="#962020",
+                                lw=0.8, alpha=0.6),
+            )
+
+    fig2.suptitle(
+        "miRNA strand distribution per chromosome — GENCODE v49 | GRCh38",
+        fontsize=12, fontweight="bold", color="#1A2530", y=1.01
+    )
+
+    out2 = os.path.join(PROC_DIR, "mirna_strand_distribution.png")
+    fig2.savefig(out2, dpi=300, bbox_inches="tight",
+                 facecolor="white", edgecolor="none")
+    plt.close(fig2)
+    print(f"[DONE] Strand distribution plot saved to: {out2}")
+
+    # ── Summary stats ──
+    print(f"\n[SUMMARY] Distribution analysis:")
+    print(f"  Most dense chromosome  : {CHR_ORDER[densities.index(max(densities))].replace('chr','')}  "
+          f"({max(densities):.1f} loci/Mb)")
+    print(f"  Least dense chromosome : {CHR_ORDER[densities.index(min(densities))].replace('chr','')}  "
+          f"({min(densities):.1f} loci/Mb)")
+    total_pos = sum(strand_pos.values())
+    total_neg = sum(strand_neg.values())
+    print(f"  Global strand balance  : +{total_pos} ({100*total_pos/total_loci:.1f}%)  "
+          f"/ -{total_neg} ({100*total_neg/total_loci:.1f}%)")
+
+    return out1, out2
+
+
+# =========================
+# STEP 12 — INTEGRATED MASTER TABLES
+# =========================
+def generate_master_tables(crossref_records, bed_file, seed_families):
+    """
+    Generate two integrated master tables:
+
+    Table 1 — master_table_arm_level.tsv
+        One row per mature miRNA arm (5p or 3p).
+        Columns: mimat_id, mirbase_name, arm, sequence, seed_2_8,
+                 seed_family_size, mirgenedb_id, mirgenedb_family,
+                 gencode_match, chrom, start, end, strand, confidence_tier
+
+    Table 2 — master_table_gene_level.tsv
+        One row per miRNA gene (5p and 3p collapsed).
+        Columns: gene_root, mirbase_5p, mirbase_3p, mimat_5p, mimat_3p,
+                 seed_5p, seed_3p, mirgenedb_family, gencode_match,
+                 chrom, start, end, strand, confidence_tier
+
+    Confidence tiers:
+        Tier 1 — in GENCODE + miRBase + miRGeneDB  (856 arms)
+        Tier 2 — in GENCODE + miRBase only          (1718 arms)
+        Tier 3 — in miRBase only                    (80 arms, low-confidence)
+    """
+    print("\n" + "=" * 60)
+    print("[STEP 12] Generating integrated master tables")
+    print("=" * 60)
+    print("[STORY] Consolidating all annotation layers into two deliverable tables:")
+    print("  • Arm-level  : one row per mature miRNA (5p/3p separate)")
+    print("  • Gene-level : one row per miRNA gene (5p+3p merged)")
+    print("[INFO]  Confidence tiers:")
+    print("  Tier 1 — GENCODE + miRBase + miRGeneDB  (highest confidence)")
+    print("  Tier 2 — GENCODE + miRBase only")
+    print("  Tier 3 — miRBase only                   (low confidence)")
+    time.sleep(1)
+
+    # ── Load BED coordinates ──
+    # key = gencode_norm_match (uppercase gene symbol) → (chrom, start, end, strand)
+    bed_coords = {}
+    with open(bed_file) as fh:
+        for line in fh:
+            cols = line.strip().split("\t")
+            if len(cols) < 6:
+                continue
+            chrom, start, end, name, _, strand = cols[:6]
+            if name.startswith("MIR") or name.startswith("LET"):
+                # Store first occurrence (already deduplicated)
+                if name not in bed_coords:
+                    bed_coords[name] = (chrom, start, end, strand)
+
+    # ── Build seed family size lookup ──
+    seed_size = {seed: len(members) for seed, members in seed_families.items()}
+
+    # ── Assign confidence tier ──
+    def get_tier(mirgenedb_id, gencode_match):
+        if mirgenedb_id and gencode_match:
+            return "Tier1"
+        elif gencode_match:
+            return "Tier2"
+        else:
+            return "Tier3"
+
+    # ── Derive miRGeneDB family name (collapse paralogs) ──
+    def mgd_family(mirgenedb_id):
+        if not mirgenedb_id:
+            return ""
+        # e.g. Hsa-Mir-21-P1_5p → MIR21
+        name = mirgenedb_id
+        name = re.sub(r"^Hsa-", "", name)
+        name = re.sub(r"_.*$", "", name)   # remove _5p, _3p, etc.
+        return collapse_family(normalize(name))
+
+    # ════════════════════════════════════════════════
+    # TABLE 1 — ARM LEVEL
+    # ════════════════════════════════════════════════
+    arm_rows = []
+    for rec in crossref_records:
+        mimat_id, mirbase_name, mirgenedb_id, arm, seq, seed, gc_match = rec
+
+        coords    = bed_coords.get(gc_match, ("", "", "", ""))
+        chrom, start, end, strand = coords
+        tier      = get_tier(mirgenedb_id, gc_match)
+        fam_size  = seed_size.get(seed, 1)
+        mgd_fam   = mgd_family(mirgenedb_id)
+
+        arm_rows.append((
+            mimat_id, mirbase_name, arm, seq, seed,
+            str(fam_size), mirgenedb_id, mgd_fam,
+            gc_match, chrom, start, end, strand, tier
+        ))
+
+    out_arm = os.path.join(PROC_DIR, "master_table_arm_level.tsv")
+    header_arm = ("mimat_id\tmirbase_name\tarm\tsequence\tseed_2_8\t"
+                  "seed_family_size\tmirgenedb_id\tmirgenedb_family\t"
+                  "gencode_match\tchrom\tstart\tend\tstrand\tconfidence_tier\n")
+    with open(out_arm, "w") as fh:
+        fh.write(header_arm)
+        for row in sorted(arm_rows, key=lambda r: (r[13], r[1])):  # sort by tier, name
+            fh.write("\t".join(row) + "\n")
+
+    tier_counts = {}
+    for row in arm_rows:
+        tier_counts[row[13]] = tier_counts.get(row[13], 0) + 1
+
+    print(f"\n[TABLE 1] Arm-level master table")
+    print(f"  Total rows           : {len(arm_rows)}")
+    print(f"  Tier 1 (3-way)       : {tier_counts.get('Tier1', 0)}")
+    print(f"  Tier 2 (GC+MB)       : {tier_counts.get('Tier2', 0)}")
+    print(f"  Tier 3 (MB only)     : {tier_counts.get('Tier3', 0)}")
+    print(f"  [OUTPUT] {out_arm}")
+
+    # ════════════════════════════════════════════════
+    # TABLE 2 — GENE LEVEL (collapse 5p + 3p)
+    # ════════════════════════════════════════════════
+    # Group by gene root — derived by stripping arm from mirbase_name
+    # e.g. hsa-miR-21-5p and hsa-miR-21-3p → gene root hsa-miR-21
+    from collections import defaultdict
+    genes = defaultdict(dict)
+
+    for rec in crossref_records:
+        mimat_id, mirbase_name, mirgenedb_id, arm, seq, seed, gc_match = rec
+
+        # Derive gene root: remove -5p / -3p suffix
+        gene_root = re.sub(r"-[35]p\*?$", "", mirbase_name)
+
+        g = genes[gene_root]
+        g.setdefault("gene_root", gene_root)
+        g.setdefault("gencode_match", gc_match or g.get("gencode_match", ""))
+        g.setdefault("mirgenedb_family", mgd_family(mirgenedb_id) or
+                     g.get("mirgenedb_family", ""))
+
+        if arm == "5p":
+            g["mirbase_5p"]  = mirbase_name
+            g["mimat_5p"]    = mimat_id
+            g["seed_5p"]     = seed
+            g["mirgenedb_5p"] = mirgenedb_id
+        elif arm == "3p":
+            g["mirbase_3p"]  = mirbase_name
+            g["mimat_3p"]    = mimat_id
+            g["seed_3p"]     = seed
+            g["mirgenedb_3p"] = mirgenedb_id
+        else:
+            g.setdefault("mirbase_other", mirbase_name)
+            g.setdefault("mimat_other",   mimat_id)
+
+        # Coordinates from BED
+        if gc_match and "chrom" not in g:
+            coords = bed_coords.get(gc_match, ("", "", "", ""))
+            g["chrom"], g["start"], g["end"], g["strand"] = coords
+
+    gene_rows = []
+    for gene_root, g in sorted(genes.items()):
+        mgd_any = g.get("mirgenedb_5p", "") or g.get("mirgenedb_3p", "")
+        gc      = g.get("gencode_match", "")
+        tier    = get_tier(mgd_any, gc)
+
+        gene_rows.append((
+            gene_root,
+            g.get("mirbase_5p",  ""),
+            g.get("mirbase_3p",  ""),
+            g.get("mimat_5p",    ""),
+            g.get("mimat_3p",    ""),
+            g.get("seed_5p",     ""),
+            g.get("seed_3p",     ""),
+            g.get("mirgenedb_family", ""),
+            gc,
+            g.get("chrom",  ""),
+            g.get("start",  ""),
+            g.get("end",    ""),
+            g.get("strand", ""),
+            tier
+        ))
+
+    out_gene = os.path.join(PROC_DIR, "master_table_gene_level.tsv")
+    header_gene = ("gene_root\tmirbase_5p\tmirbase_3p\tmimat_5p\tmimat_3p\t"
+                   "seed_5p\tseed_3p\tmirgenedb_family\tgencode_match\t"
+                   "chrom\tstart\tend\tstrand\tconfidence_tier\n")
+    with open(out_gene, "w") as fh:
+        fh.write(header_gene)
+        for row in sorted(gene_rows, key=lambda r: (r[13], r[0])):
+            fh.write("\t".join(row) + "\n")
+
+    tier_gene = {}
+    for row in gene_rows:
+        tier_gene[row[13]] = tier_gene.get(row[13], 0) + 1
+
+    print(f"\n[TABLE 2] Gene-level master table")
+    print(f"  Total rows           : {len(gene_rows)}")
+    print(f"  Tier 1 (3-way)       : {tier_gene.get('Tier1', 0)}")
+    print(f"  Tier 2 (GC+MB)       : {tier_gene.get('Tier2', 0)}")
+    print(f"  Tier 3 (MB only)     : {tier_gene.get('Tier3', 0)}")
+    print(f"  [OUTPUT] {out_gene}")
+
+    return out_arm, out_gene
+
+# =========================
+# STEP 14 — QC REPORT
 # =========================
 def generate_qc_report(bed_file, fasta_file, gencode_set, mirbase_set,
                        mirgenedb_set, crossref_records=None):
     print("\n" + "=" * 60)
-    print("[STEP 11] Generating QC report")
+    print("[STEP 14] Generating QC report")
     print("=" * 60)
     time.sleep(1)
 
@@ -1120,7 +1743,7 @@ def main():
 
     gencode_norm_file, gencode_norm_set = clean_and_normalize_gencode(gencode_raw_file, raw_set)  # Step 6
     mirbase_norm_file, mirbase_norm_set = normalize_mirbase(mirbase_raw_file)                      # Step 7
-    seed_tsv, seed_fam_tsv, _, _ = extract_seed_sequences()                             # Step 7.5
+    seed_tsv, seed_fam_tsv, _, seed_families = extract_seed_sequences()                 # Step 7.5
     mirgenedb_norm_file, mirgenedb_set  = parse_mirgenedb()                                        # Step 8
 
     crossref_tsv, crossref_records = build_mimat_crossref()              # Step 8.5
@@ -1131,7 +1754,10 @@ def main():
     )
 
     generate_venn_plot(gencode_norm_set, mirbase_norm_set, mirgenedb_set, crossref_records)  # Step 10
-    generate_qc_report(                                     # Step 11
+    generate_chromosomal_map(bed_file)                                               # Step 11
+    generate_master_tables(crossref_records, bed_file, seed_families)            # Step 12
+    generate_distribution_plots(bed_file)                                          # Step 13
+    generate_qc_report(                                     # Step 14
         bed_file, output_fa,
         gencode_norm_set, mirbase_norm_set, mirgenedb_set, crossref_records,
     )
@@ -1157,7 +1783,13 @@ def main():
         ("Step 9d – High-confidence", "high_confidence_mirnas.txt",         "3-way intersection"),
         ("Step 10 – Venn (names)",    "venn_mirna_names.png",               "Name-normalized 3-way overlap"),
         ("Step 10 – Venn (MIMAT)",    "venn_mirna_mimat.png",               "MIMAT-based 3-way overlap (recommended)"),
-        ("Step 11 – QC report",       "qc_report.txt",                      "Pipeline quality metrics"),
+        ("Step 11 – Chr map (full)",  "mirna_chromosomal_map.png",          "miRNA loci across all GRCh38 chromosomes"),
+        ("Step 11 – Chr map (zoom)",  "mirna_chromosomal_zoom.png",         "Detailed view chr1, chr19, chrX, chrY"),
+        ("Step 12 – Arm-level table", "master_table_arm_level.tsv",         "One row per mature miRNA arm"),
+        ("Step 12 – Gene-level table","master_table_gene_level.tsv",        "One row per miRNA gene (5p+3p merged)"),
+        ("Step 13 – Density norm",    "mirna_density_normalized.png",       "miRNA loci per Mb per chromosome"),
+        ("Step 13 – Strand dist",     "mirna_strand_distribution.png",      "+ vs - strand per chromosome"),
+        ("Step 14 – QC report",       "qc_report.txt",                      "Pipeline quality metrics"),
     ]
     print(f"  {'Step':<28} {'File':<42} {'Description'}")
     print("  " + "-" * 100)
